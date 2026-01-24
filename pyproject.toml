@@ -56,8 +56,8 @@ build = "cp39-* cp310-* cp311-* cp312-*"
 # Skip 32-bit builds, musl linux, and PyPy
 skip = "*-win32 *-manylinux_i686 *-musllinux* pp*"
 
-# Test the wheel - minimal dependencies for basic import test
-test-requires = ["numpy"]
+# Test the wheel - install dependencies from wheels first to avoid scipy build
+before-test = "pip install numpy pandas scipy"
 test-command = "python -c \"import pyinla; print('pyinla imported successfully')\""
 
 [tool.cibuildwheel.linux]
