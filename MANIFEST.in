@@ -1,0 +1,42 @@
+# MANIFEST.in - Include/exclude files for source distribution
+# Note: For compiled wheels, source files are replaced by .so binaries
+
+# Include the setup files
+include setup.py
+include pyproject.toml
+include README.md
+
+# DO NOT include INLA binaries - they are downloaded on demand
+# recursive-include install/pyinla/bin *
+
+# Include model definition files
+recursive-include install/pyinla/model_defs *
+
+# Include fmesher package
+recursive-include install/pyinla/fmesher *
+
+# Include __init__.py (needed for package imports)
+include install/pyinla/__init__.py
+
+# Include binary_manager.py (for downloading binaries)
+include install/pyinla/binary_manager.py
+
+# Exclude development files
+global-exclude *.pyc
+global-exclude __pycache__
+global-exclude *.pyo
+global-exclude *.py.bak
+global-exclude .git*
+global-exclude .DS_Store
+
+# Exclude test files from distribution
+prune tests
+prune examples
+
+# Exclude documentation source
+prune pyinla-site
+
+# Exclude build artifacts
+prune build
+prune dist
+prune *.egg-info
