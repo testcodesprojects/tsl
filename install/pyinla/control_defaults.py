@@ -246,7 +246,7 @@ def control_stiles(
 # ----------------------------
 # control.taucs
 # ----------------------------
-def control_taucs(*, block_size: int = 40) -> Dict[str, Any]:
+def control_taucs(*, block_size: int = 64) -> Dict[str, Any]:
     return _ctrl_object(locals(), "taucs", check=False)
 
 
@@ -394,7 +394,7 @@ def control_inla(
     constr_marginal_diagonal: float = math.sqrt(sys.float_info.epsilon),
     improved_simplified_laplace: bool = False,
     parallel_linesearch: bool = False,
-    compute_initial_values: bool = False,
+    compute_initial_values: bool = True,
     hessian_correct_skewness_only: bool = True,
 ) -> Dict[str, Any]:
     if control_vb is None:

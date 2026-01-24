@@ -6,7 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "pyinla"
 version = "1.0.0"
 description = "Python interface for INLA (Integrated Nested Laplace Approximation) with bundled binaries."
-readme = { file = "readme.txt", content-type = "text/plain" }
 requires-python = ">=3.9"
 authors = [
   { name = "pyINLA maintainers", email = "contact@pyinla.org" },
@@ -57,8 +56,8 @@ build = "cp39-* cp310-* cp311-* cp312-*"
 # Skip 32-bit builds, musl linux, and PyPy
 skip = "*-win32 *-manylinux_i686 *-musllinux* pp*"
 
-# Test the wheel
-test-requires = ["pytest", "numpy", "pandas", "scipy"]
+# Test the wheel - minimal dependencies for basic import test
+test-requires = ["numpy"]
 test-command = "python -c \"import pyinla; print('pyinla imported successfully')\""
 
 [tool.cibuildwheel.linux]

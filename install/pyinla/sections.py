@@ -488,7 +488,46 @@ def inla_write_fmesher_file(obj: Any, filename: str, debug: bool=False) -> None:
         else:
             fp.write(arr.astype(np.float64).T.tobytes(order="C"))
 
-def inla_write_graph(graph: Any, filename: Optional[str] = None) -> str:
+def _inla_graph_binary_magic() -> int:
+    """Return the magic number for binary graph files.
+
+    This must match GMRFLib_BINARY_GRAPH_FILE_MAGIC in GMRFLib/graph.h
+    """
+    return -1
+
+
+def _write_graph_binary(adj_list: Dict[int, List[int]], n: int, filename: str) -> str:
+    """Write graph in R-INLA binary format.
+
+    Binary format:
+      int32: -1 (magic number)
+      int32: n (number of nodes)
+      For each node i from 1 to n:
+        int32: i (node number, 1-indexed)
+        int32: num_neighbors
+        int32[num_neighbors]: neighbor indices (1-indexed)
+    """
+    with open(filename, "wb") as f:
+        # Write magic number and n
+        f.write(np.array([_inla_graph_binary_magic(), n], dtype=np.int32).tobytes())
+        # Write each node
+        for node in range(1, n + 1):
+            # Preserve order from input (R-INLA doesn't sort), but remove duplicates
+            seen = set()
+            neighbors = []
+            for nb in adj_list.get(node, []):
+                if nb not in seen:
+                    seen.add(nb)
+                    neighbors.append(nb)
+            # Write: node, num_neighbors, [neighbors...]
+            header = np.array([node, len(neighbors)], dtype=np.int32)
+            f.write(header.tobytes())
+            if neighbors:
+                f.write(np.array(neighbors, dtype=np.int32).tobytes())
+    return filename
+
+
+def inla_write_graph(graph: Any, filename: Optional[str] = None, mode: str = "binary") -> str:
     """
     Write a graph file in INLA format. Accepts:
       - str: path to existing .graph file (will be copied/returned as-is)
@@ -498,80 +537,81 @@ def inla_write_graph(graph: Any, filename: Optional[str] = None) -> str:
       - iterable of (u,v) tuples (edge list)
       - 2-column numpy array (edge list)
 
-    INLA graph format:
-      Line 1: n (number of nodes)
-      Following lines: node_id num_neighbors neighbor1 neighbor2 ...
-      (node IDs are 1-indexed in the file)
+    Parameters
+    ----------
+    graph : various
+        Graph specification (see above)
+    filename : str, optional
+        Output filename. If None, a temp file is created.
+    mode : str
+        'binary' (default, matches R-INLA) or 'ascii'
 
     Returns the filename.
     """
     if filename is None:
         filename = inla_tempfile()
 
-    # If graph is a string or Path to an existing file, read and rewrite with standard format
+    # If graph is a string or Path to an existing file, read and convert to binary
     if isinstance(graph, (str, os.PathLike)):
-        graph_path = str(graph)  # Convert Path to string if needed
+        graph_path = str(graph)
         if os.path.isfile(graph_path):
-            # Read the graph file and rewrite with R-INLA standard format (trailing spaces)
-            with open(graph_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
+            # Check if already binary
+            with open(graph_path, "rb") as f:
+                first_int = np.frombuffer(f.read(4), dtype=np.int32)
+                if len(first_int) > 0 and first_int[0] == _inla_graph_binary_magic():
+                    # Already binary, just copy
+                    import shutil
+                    shutil.copy(graph_path, filename)
+                    return filename
 
-            with open(filename, "w", encoding="utf-8") as f:
-                for line in lines:
-                    line = line.strip()
-                    if line:  # Skip empty lines
-                        # R-INLA adds extra space for nodes with 0 neighbors
-                        parts = line.split()
-                        if len(parts) >= 2 and parts[1] == '0':
-                            f.write(f"{line}  \n")  # Two trailing spaces for 0-neighbor nodes
-                        else:
-                            f.write(f"{line} \n")  # One trailing space otherwise
-            return filename
+            # Text format - parse and convert to binary
+            with open(graph_path, "r", encoding="utf-8") as f:
+                lines = [l.strip() for l in f.readlines() if l.strip()]
+
+            # Parse text graph format
+            parts = lines[0].split()
+            n = int(parts[0])
+            adj_list: Dict[int, List[int]] = {i: [] for i in range(1, n + 1)}
+
+            idx = 1 if len(parts) == 1 else 0
+            while idx < len(lines):
+                parts = lines[idx].split()
+                if len(parts) >= 2:
+                    node = int(parts[0])
+                    num_nb = int(parts[1])
+                    neighbors = [int(x) for x in parts[2:2+num_nb]]
+                    adj_list[node] = neighbors
+                idx += 1
+
+            return _write_graph_binary(adj_list, n, filename)
         else:
             raise ValueError(f"Graph file not found: {graph_path}")
 
     # Check if it's a scipy sparse matrix
     if _HAVE_SCIPY and sp.issparse(graph):
-        # Convert to adjacency list format
-        # Sparse matrix is 0-indexed, INLA uses 1-indexed
         n = graph.shape[0]
         coo = graph.tocoo()
-        adj_list: Dict[int, List[int]] = {i: [] for i in range(n)}
+        adj_list = {i: [] for i in range(1, n + 1)}
         for i, j, val in zip(coo.row, coo.col, coo.data):
-            if val != 0 and i != j:  # Skip self-loops and zero entries
-                adj_list[int(i)].append(int(j))
-
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(f"{n} \n")  # R-INLA adds trailing space
-            for node in range(n):
-                neighbors = sorted(set(adj_list[node]))  # Remove duplicates, sort
-                # Convert to 1-indexed for INLA
-                neighbor_str = " ".join(str(nb + 1) for nb in neighbors)
-                f.write(f"{node + 1} {len(neighbors)} {neighbor_str} \n")  # R-INLA adds trailing space
-        return filename
+            if val != 0 and i != j:
+                adj_list[int(i) + 1].append(int(j) + 1)  # Convert to 1-indexed
+        return _write_graph_binary(adj_list, n, filename)
 
     # Check if it's a dense numpy array (adjacency matrix)
     if isinstance(graph, np.ndarray) and graph.ndim == 2 and graph.shape[0] == graph.shape[1]:
         n = graph.shape[0]
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(f"{n} \n")  # R-INLA adds trailing space
-            for node in range(n):
-                neighbors = [j for j in range(n) if graph[node, j] != 0 and node != j]
-                neighbor_str = " ".join(str(nb + 1) for nb in neighbors)
-                f.write(f"{node + 1} {len(neighbors)} {neighbor_str} \n")  # R-INLA adds trailing space
-        return filename
+        adj_list = {i: [] for i in range(1, n + 1)}
+        for node in range(n):
+            neighbors = [j + 1 for j in range(n) if graph[node, j] != 0 and node != j]
+            adj_list[node + 1] = neighbors
+        return _write_graph_binary(adj_list, n, filename)
 
     # Handle dict format {node: [neighbors]} - assume already 1-indexed
     if isinstance(graph, dict):
         nodes = sorted(graph.keys())
         n = max(nodes) if nodes else 0
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(f"{n} \n")  # R-INLA adds trailing space
-            for node in range(1, n + 1):
-                neighbors = sorted(set(graph.get(node, [])))
-                neighbor_str = " ".join(str(nb) for nb in neighbors)
-                f.write(f"{node} {len(neighbors)} {neighbor_str} \n")  # R-INLA adds trailing space
-        return filename
+        adj_list = {i: list(graph.get(i, [])) for i in range(1, n + 1)}
+        return _write_graph_binary(adj_list, n, filename)
 
     # Handle edge list format
     edges: List[Tuple[int,int]] = []
@@ -594,18 +634,10 @@ def inla_write_graph(graph: Any, filename: Optional[str] = None) -> str:
         adj_list_edges: Dict[int, List[int]] = {i: [] for i in range(1, n + 1)}
         for u, v in edges:
             adj_list_edges[u].append(v)
-
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(f"{n} \n")  # R-INLA adds trailing space
-            for node in range(1, n + 1):
-                neighbors = sorted(set(adj_list_edges.get(node, [])))
-                neighbor_str = " ".join(str(nb) for nb in neighbors)
-                f.write(f"{node} {len(neighbors)} {neighbor_str} \n")  # R-INLA adds trailing space
+        return _write_graph_binary(adj_list_edges, n, filename)
     else:
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write("0 \n")  # R-INLA adds trailing space
-
-    return filename
+        # Empty graph
+        return _write_graph_binary({}, 0, filename)
 
 def _np_to_int32(x: Sequence[int]) -> np.ndarray:
     return np.asarray(x, dtype=np.int32)
@@ -2770,7 +2802,7 @@ def inla_stiles_section(file: str, data_dir: str, contr: Dict[str, Any]) -> None
 def inla_taucs_section(file: str, data_dir: str, contr: Dict[str, Any]) -> None:
     _writeln(file, f"\n{inla_secsep('INLA.taucs')}\n")
     _writeln(file, "type = taucs\n")
-    block_size = contr.get('block.size', contr.get('block_size', 12))
+    block_size = contr.get('block.size', contr.get('block_size', 64))
     _writeln(file, f"block.size = {max(int(block_size), 0)}\n")
     _writeln(file, "\n")
 
