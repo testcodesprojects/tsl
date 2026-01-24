@@ -1,0 +1,105 @@
+# ============================================
+# STRICT .gitignore - ONLY WHEEL BUILD FILES
+# ============================================
+
+# Python compiled files
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+*.egg
+*.bak
+
+# Build artifacts (generated during build)
+build/
+dist/
+wheelhouse/
+*.whl
+*.tar.gz
+
+# Binaries (downloaded on-demand, NOT in repo/wheel)
+install/pyinla/bin/
+
+# Cython generated files (regenerated during build)
+*.c
+*.cpp
+*.so
+install/pyinla/*.c
+install/pyinla/*.cpp
+install/pyinla/*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ==================================================
+# EXCLUDE EVERYTHING NOT NEEDED FOR WHEEL BUILDING
+# ==================================================
+
+# Large data files (NOT needed for wheel)
+*.csv
+*.csv.gz
+*.RData
+*.txt.gz
+ghcnd-stations.txt
+ETOPO2.RData
+2024.csv.gz
+data/
+
+# Documentation (NOT needed for wheel)
+docs/
+mybook-pyinla/
+inlabook/
+pyinla-site/
+latex-docs/
+paper/
+*.md
+!README.md
+!MANIFEST.in
+
+# Examples (NOT needed for wheel)
+examples/
+notebooks/
+r_examples/
+online/
+spde_elias/
+flattened/
+likelihood_flat/
+
+# Tests (NOT needed for wheel building)
+tests/
+
+# R source files (NOT needed for Python wheel)
+install/R-org/
+install/pyinla_backup/
+install/old_house/
+
+# Build/deployment scripts (NOT needed for wheel)
+build_wheel.sh
+push.sh
+update_binaries.sh
+*.sh
+
+# Citation/metadata (NOT needed for wheel)
+CITATION.cff
+codemeta.json
+.zenodo.json
+PLAN_*.md
+SESSION_SUMMARY.md
+WHEEL_BUILD_SETUP.md
+BINARY_DISTRIBUTION.md
+PARAMETER_TEST_COVERAGE.md
+
+# Misc
+*.log
+.claude/
+.pytest_cache/
+=12.3
+gaussian_likelihood_rules.txt
