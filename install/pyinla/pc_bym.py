@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -16,6 +18,22 @@ except Exception:
     HAVE_SCIPY = False
     UnivariateSpline = None
     la = None
+
+
+def _get_num_threads() -> int:
+    """Get number of threads to use for parallel computation."""
+    # Check environment variable first (like R-INLA's mc.cores)
+    env_cores = os.environ.get("PYINLA_NUM_THREADS") or os.environ.get("OMP_NUM_THREADS")
+    if env_cores:
+        try:
+            return max(1, int(env_cores))
+        except ValueError:
+            pass
+    # Default to number of CPUs, capped at 8 to avoid overhead
+    try:
+        return min(8, max(1, os.cpu_count() or 1))
+    except Exception:
+        return 1
 
 
 # --------------------------- helpers ---------------------------
@@ -262,17 +280,27 @@ def pc_bym_phi(*,
             d[k] = math.sqrt(aa - bb) if aa >= bb else np.nan
     else:
         phi_s = 1.0 / (1.0 + np.exp(-np.concatenate([np.linspace(-15, 0, 40), np.arange(1, 13)])))
-        d = np.empty_like(phi_s)
         log_q1_det = sparse_det_bym(Qs, adjust_for_con_comp=True, constr=bc["constr"], rankdef=rankdef)
         I = np.eye(n)
-        for k, phi in enumerate(phi_s):
+
+        # Worker function for parallel computation (like R-INLA's inla.mclapply)
+        def _compute_d_for_phi(phi: float) -> float:
             aa = n * phi * f
             c = phi / (1.0 - phi)
             log_det_Qc = sparse_det_bym(Qs + c * I, adjust_for_con_comp=True, constr=bc["constr"], rankdef=rankdef)
             bb = (n * math.log((1.0 - phi) / phi) + log_det_Qc - (log_q1_det - n * math.log(phi)))
-            d[k] = math.sqrt(aa - bb) if aa >= bb else np.nan
+            result = math.sqrt(aa - bb) if aa >= bb else np.nan
             if debug:
-                print(f"phi={phi:.4f} aa={aa:.6g} bb={bb:.6g} d={d[k]:.6g}")
+                print(f"phi={phi:.4f} aa={aa:.6g} bb={bb:.6g} d={result:.6g}")
+            return result
+
+        # Parallel execution matching R-INLA's inla.mclapply
+        num_threads = _get_num_threads()
+        if num_threads > 1 and len(phi_s) > 1:
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                d = np.array(list(executor.map(_compute_d_for_phi, phi_s)))
+        else:
+            d = np.array([_compute_d_for_phi(phi) for phi in phi_s])
 
     # Clean and trim first 6 points (as in R)
     ok = np.isfinite(d)
