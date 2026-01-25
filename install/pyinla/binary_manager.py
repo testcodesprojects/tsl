@@ -213,9 +213,18 @@ class BinaryManager:
 
         # Filter by OS if specified
         if os_name:
-            binaries = [b for b in binaries if os_name.lower() in b['os'].lower()]
-            if not binaries:
-                raise RuntimeError(f"No binaries found for OS: {os_name}")
+            filtered = [b for b in binaries if os_name.lower() in b['os'].lower()]
+            if not filtered:
+                # Show available options to help user
+                available_os = sorted(set(b['os'] for b in binaries))[:10]
+                os_examples = '\n  '.join(available_os[:5])
+                raise RuntimeError(
+                    f"No binaries found matching '{os_name}'.\n\n"
+                    f"Available OS options (showing first 5):\n  {os_examples}\n\n"
+                    f"Use list_available_os() to see all options, or call download_binary() "
+                    f"without os_name for interactive selection."
+                )
+            binaries = filtered
 
         # Sort by version (newest first) and OS
         binaries.sort(key=lambda x: (x['version'], x['os']), reverse=True)
@@ -277,18 +286,24 @@ class BinaryManager:
             if not inla_binary:
                 raise RuntimeError(f"Could not find INLA binary in extracted files")
 
-            # Install
+            # Install ALL files from extracted directory (not just the wrapper)
+            # The .run files are shell scripts that call the actual binaries
             binary_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(inla_binary, binary_path)
-            binary_path.chmod(0o755)
 
-            # Also copy fmesher if present
-            fmesher_src = extracted_dir / "fmesher.run"
-            if fmesher_src.exists():
-                fmesher_dst = binary_path.parent / "fmesher.run"
-                shutil.copy2(fmesher_src, fmesher_dst)
-                fmesher_dst.chmod(0o755)
-                print(f"Installed fmesher to: {fmesher_dst}")
+            # Copy all files from extracted directory
+            for item in extracted_dir.iterdir():
+                if item.is_file():
+                    dst = binary_path.parent / item.name
+                    shutil.copy2(item, dst)
+                    dst.chmod(0o755)
+                elif item.is_dir():
+                    # Copy subdirectories too (e.g., external libs)
+                    dst_dir = binary_path.parent / item.name
+                    if dst_dir.exists():
+                        shutil.rmtree(dst_dir)
+                    shutil.copytree(item, dst_dir)
+
+            print(f"Installed {len(list(extracted_dir.iterdir()))} files to: {binary_path.parent}")
 
         print(f"Installed INLA binary to: {binary_path}")
         return binary_path
@@ -384,19 +399,22 @@ class BinaryManager:
             if not inla_binary:
                 raise RuntimeError("Could not find INLA binary in Mac package")
 
-            # Install
+            # Install ALL files from the binary directory
             binary_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(inla_binary, binary_path)
-            binary_path.chmod(0o755)
+            src_dir = inla_binary.parent
 
-            # Also copy fmesher if present
-            fmesher_src = inla_binary.parent / "fmesher.run"
-            if fmesher_src.exists():
-                fmesher_dst = binary_path.parent / "fmesher.run"
-                shutil.copy2(fmesher_src, fmesher_dst)
-                fmesher_dst.chmod(0o755)
+            for item in src_dir.iterdir():
+                if item.is_file():
+                    dst = binary_path.parent / item.name
+                    shutil.copy2(item, dst)
+                    dst.chmod(0o755)
+                elif item.is_dir():
+                    dst_dir = binary_path.parent / item.name
+                    if dst_dir.exists():
+                        shutil.rmtree(dst_dir)
+                    shutil.copytree(item, dst_dir)
 
-        print(f"Installed INLA binary to: {binary_path}")
+        print(f"Installed INLA binary to: {binary_path.parent}")
         return binary_path
 
     def download_binary(
@@ -513,6 +531,51 @@ def list_available_binaries(platform: Optional[str] = None) -> List[str]:
     return _manager.list_available_versions(platform_name=platform)
 
 
+def list_available_os(print_list: bool = True) -> List[str]:
+    """List available OS options for Linux binary download.
+
+    This helps you find the correct os_name string for download_binary().
+
+    Args:
+        print_list: If True, print a formatted list (default). If False, just return the list.
+
+    Returns:
+        List of available OS names (e.g., ["Ubuntu-22.04.5 LTS (Jammy Jellyfish) [x86_64]", ...])
+
+    Example:
+        >>> from pyinla import list_available_os
+        >>> list_available_os()  # Prints formatted list
+        Available Linux OS options:
+          1. Ubuntu-22.04.5 LTS (Jammy Jellyfish) [x86_64]
+          2. Ubuntu-24.04.1 LTS (Noble Numbat) [x86_64]
+          ...
+
+        Use with download_binary:
+          download_binary(os_name="Ubuntu-22.04")  # partial match works
+    """
+    binaries = _manager.list_linux_binaries()
+
+    if not binaries:
+        if print_list:
+            print("Could not fetch available binaries. Check internet connection.")
+        return []
+
+    # Get unique OS names from latest version
+    latest_version = max(set(b['version'] for b in binaries))
+    os_names = sorted(set(b['os'] for b in binaries if b['version'] == latest_version))
+
+    if print_list:
+        print(f"\nAvailable Linux OS options (Version {latest_version}):\n")
+        for i, os_name in enumerate(os_names, 1):
+            print(f"  {i:2}. {os_name}")
+        print("\nUsage with download_binary() - partial match works:")
+        print('  download_binary(os_name="Ubuntu-22.04")  # matches Ubuntu-22.04.x LTS ...')
+        print('  download_binary(os_name="Ubuntu-24")     # matches Ubuntu-24.x LTS ...')
+        print('  download_binary(os_name="Fedora")        # matches Fedora-x ...')
+
+    return os_names
+
+
 def is_binary_installed(platform: Optional[str] = None) -> bool:
     """Check if binary is installed for current or specified platform."""
     return _manager.is_installed(platform_name=platform)
@@ -565,12 +628,28 @@ def _cli_install():
     parser.add_argument(
         "--list",
         action="store_true",
-        help="List available binaries"
+        help="List available OS options for Linux"
+    )
+    parser.add_argument(
+        "--list-versions",
+        action="store_true",
+        help="List available binary versions"
     )
 
     args = parser.parse_args()
 
     if args.list:
+        platform_name = _manager.detect_platform()
+        print(f"Platform: {platform_name}")
+
+        if platform_name == "linux":
+            list_available_os(print_list=True)
+        else:
+            print(f"\nMac detected ({platform_name}) - binary auto-selected based on architecture.")
+            print("Just run: pyinla-install")
+        return
+
+    if args.list_versions:
         platform_name = _manager.detect_platform()
         print(f"Platform: {platform_name}")
 
@@ -585,7 +664,7 @@ def _cli_install():
                     versions[b['version']] = []
                 versions[b['version']].append(b['os'])
 
-            print(f"\nFound {len(versions)} versions:")
+            print(f"\nFound {len(versions)} versions (showing latest 5):")
             for ver in sorted(versions.keys(), reverse=True)[:5]:
                 print(f"\n  Version {ver}:")
                 for os_name in sorted(versions[ver])[:10]:
