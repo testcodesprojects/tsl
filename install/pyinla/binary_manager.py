@@ -1,38 +1,35 @@
 """Binary download and management for pyINLA.
 
-This module handles downloading INLA binaries on-demand instead of bundling them in wheels.
-Users can select which binary version to use.
+This module handles downloading INLA binaries on-demand, similar to R-INLA's
+inla.binary.install() function. It fetches available binaries from the
+official R-INLA download server.
+
+Linux: Uses https://inla.r-inla-download.org/Linux-builds/FILES listing
+Mac: Extracts from R package at https://inla.r-inla-download.org/R/testing/
 """
 
 import os
 import platform
 import shutil
 import sys
+import tarfile
+import tempfile
 import urllib.request
+import urllib.parse
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 
 
 class BinaryManager:
     """Manages INLA binary downloads and installation."""
 
-    # Binary download URLs - using R-INLA's official download server
-    # Same server that R-INLA package uses
-    # Environment variable override: PYINLA_BINARY_BASE_URL
-    BINARY_URLS = {
-        "linux": {
-            "23.05.30-1": "https://inla.r-inla-download.org/Linux-builds/Version_23.05.30-1/Ubuntu-22.04/64bit.tgz",
-            "latest": "https://inla.r-inla-download.org/Linux-builds/testing/Ubuntu-22.04/64bit.tgz",
-        },
-        "mac": {
-            "23.05.30-1": "https://inla.r-inla-download.org/Mac/testing/Mac-11/64bit.tgz",
-            "latest": "https://inla.r-inla-download.org/Mac/testing/Mac-11/64bit.tgz",
-        },
-        "mac.arm64": {
-            "23.05.30-1": "https://inla.r-inla-download.org/Mac/testing/Mac-arm64/64bit.tgz",
-            "latest": "https://inla.r-inla-download.org/Mac/testing/Mac-arm64/64bit.tgz",
-        },
-    }
+    # Base URLs for R-INLA binary downloads
+    LINUX_FILES_URL = "https://inla.r-inla-download.org/Linux-builds/FILES"
+    LINUX_BASE_URL = "https://inla.r-inla-download.org/Linux-builds"
+
+    # Mac R packages (binaries are inside these)
+    MAC_ARM64_BASE = "https://inla.r-inla-download.org/R/testing/bin/macosx/big-sur-arm64/contrib/4.4"
+    MAC_X86_BASE = "https://inla.r-inla-download.org/R/testing/bin/macosx/big-sur-x86_64/contrib/4.4"
 
     def __init__(self):
         """Initialize binary manager."""
@@ -50,7 +47,6 @@ class BinaryManager:
         if system == "linux":
             return "linux"
         elif system == "darwin":
-            # Check if ARM or Intel
             machine = platform.machine().lower()
             if "arm" in machine or "aarch64" in machine:
                 return "mac.arm64"
@@ -86,69 +82,85 @@ class BinaryManager:
         binary_path = self.get_binary_path(platform_name)
         return binary_path.exists() and binary_path.is_file()
 
-    def download_binary(
-        self,
-        version: str = "latest",
-        platform_name: Optional[str] = None,
-        force: bool = False
-    ) -> Path:
-        """Download INLA binary.
+    def _fetch_linux_files_list(self) -> List[str]:
+        """Fetch the FILES listing from R-INLA Linux builds server."""
+        try:
+            with urllib.request.urlopen(self.LINUX_FILES_URL, timeout=30) as response:
+                content = response.read().decode('utf-8')
+                return [line.strip() for line in content.split('\n') if line.strip()]
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch Linux builds list: {e}")
+
+    def list_linux_binaries(self, version: Optional[str] = None, arch: Optional[str] = None) -> List[Dict]:
+        """List available Linux binaries.
 
         Args:
-            version: Binary version to download (default: "latest")
-            platform_name: Platform name (auto-detected if None)
-            force: Force re-download even if already exists
+            version: Filter by INLA version (e.g., "26.01.23")
+            arch: Filter by architecture ("x86_64" or "aarch64")
 
         Returns:
-            Path to downloaded binary
+            List of dicts with 'os', 'version', 'path', 'url' keys
         """
-        if platform_name is None:
-            platform_name = self.detect_platform()
+        files = self._fetch_linux_files_list()
 
-        binary_path = self.get_binary_path(platform_name)
+        # Detect current architecture
+        if arch is None:
+            machine = platform.machine().lower()
+            if "aarch64" in machine or "arm64" in machine:
+                arch = "aarch64"
+            else:
+                arch = "x86_64"
 
-        # Check if already installed
-        if not force and self.is_installed(platform_name):
-            print(f"INLA binary already installed at: {binary_path}")
-            return binary_path
+        binaries = []
+        for line in files:
+            # Parse: ./Ubuntu-22.04.5 LTS (Jammy Jellyfish) [x86_64]/Version_26.01.23/64bit.tgz
+            if not line.startswith('./') or not line.endswith('/64bit.tgz'):
+                continue
 
-        # Get download URL
-        if platform_name not in self.BINARY_URLS:
-            raise ValueError(f"No binary available for platform: {platform_name}")
+            # Filter by architecture
+            if arch == "aarch64":
+                if "[aarch64]" not in line:
+                    continue
+            else:
+                if "[aarch64]" in line:
+                    continue
 
-        platform_versions = self.BINARY_URLS[platform_name]
-        if version not in platform_versions:
-            available = ", ".join(platform_versions.keys())
-            raise ValueError(f"Version '{version}' not available. Available: {available}")
+            # Extract OS and version
+            parts = line[2:].split('/')  # Remove ./
+            if len(parts) >= 3:
+                os_name = parts[0]
+                ver_part = parts[1]
+                if ver_part.startswith('Version_'):
+                    ver = ver_part[8:]  # Remove 'Version_'
 
-        url = platform_versions[version]
+                    # Filter by version if specified
+                    if version and version not in ver:
+                        continue
 
-        # Allow custom base URL via environment variable
-        custom_base_url = os.environ.get("PYINLA_BINARY_BASE_URL")
-        if custom_base_url:
-            # Replace the base URL while keeping the path structure
-            # Example: https://binaries.pyinla.org/latest/linux/inla.mkl.run
-            # becomes: https://your-cdn.com/latest/linux/inla.mkl.run
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            path = parsed.path  # /latest/linux/inla.mkl.run
-            url = custom_base_url.rstrip('/') + path
-            print(f"Using custom binary URL: {url}")
+                    # Build URL
+                    url_path = urllib.parse.quote(line[2:], safe='/')
+                    url = f"{self.LINUX_BASE_URL}/{url_path}"
 
-        # Create directory
-        binary_path.parent.mkdir(parents=True, exist_ok=True)
+                    binaries.append({
+                        'os': os_name,
+                        'version': ver,
+                        'path': line,
+                        'url': url
+                    })
 
-        # Download
-        print(f"Downloading INLA binary from {url}...")
-        print(f"Destination: {binary_path}")
+        return binaries
+
+    def _download_file(self, url: str, dest: Path, desc: str = "Downloading") -> None:
+        """Download a file with progress display."""
+        print(f"{desc}: {url}")
 
         try:
-            with urllib.request.urlopen(url) as response:
+            with urllib.request.urlopen(url, timeout=60) as response:
                 total_size = int(response.headers.get('content-length', 0))
                 downloaded = 0
                 chunk_size = 8192
 
-                with open(binary_path, 'wb') as f:
+                with open(dest, 'wb') as f:
                     while True:
                         chunk = response.read(chunk_size)
                         if not chunk:
@@ -158,31 +170,282 @@ class BinaryManager:
 
                         if total_size > 0:
                             percent = (downloaded / total_size) * 100
-                            print(f"\rProgress: {percent:.1f}%", end='', flush=True)
+                            mb_down = downloaded / (1024 * 1024)
+                            mb_total = total_size / (1024 * 1024)
+                            print(f"\rProgress: {percent:.1f}% ({mb_down:.1f}/{mb_total:.1f} MB)", end='', flush=True)
 
                 print()  # New line after progress
 
-            # Make executable
-            binary_path.chmod(0o755)
+        except Exception as e:
+            if dest.exists():
+                dest.unlink()
+            raise RuntimeError(f"Download failed: {e}")
 
-            print(f"✓ Binary downloaded and installed successfully")
+    def download_linux_binary(
+        self,
+        os_name: Optional[str] = None,
+        version: Optional[str] = None,
+        force: bool = False,
+        interactive: bool = True
+    ) -> Path:
+        """Download Linux INLA binary.
+
+        Args:
+            os_name: OS name to filter (e.g., "Ubuntu-22.04"). If None, show choices.
+            version: Version to download. If None, use latest.
+            force: Force re-download even if exists
+            interactive: If True, prompt user to choose when multiple options
+
+        Returns:
+            Path to installed binary
+        """
+        binary_path = self.get_binary_path("linux")
+
+        if not force and self.is_installed("linux"):
+            print(f"INLA binary already installed at: {binary_path}")
             return binary_path
 
-        except Exception as e:
-            # Clean up partial download
-            if binary_path.exists():
-                binary_path.unlink()
-            raise RuntimeError(f"Failed to download binary: {e}")
+        # Get available binaries
+        binaries = self.list_linux_binaries(version=version)
 
-    def list_available_versions(self, platform_name: Optional[str] = None) -> list:
+        if not binaries:
+            raise RuntimeError("No Linux binaries found. Check your internet connection.")
+
+        # Filter by OS if specified
+        if os_name:
+            binaries = [b for b in binaries if os_name.lower() in b['os'].lower()]
+            if not binaries:
+                raise RuntimeError(f"No binaries found for OS: {os_name}")
+
+        # Sort by version (newest first) and OS
+        binaries.sort(key=lambda x: (x['version'], x['os']), reverse=True)
+
+        # If multiple options and interactive, let user choose
+        if len(binaries) > 1 and interactive and os_name is None:
+            print("\nAvailable Linux binaries:")
+            # Show unique OS options for latest version
+            latest_version = binaries[0]['version']
+            latest_binaries = [b for b in binaries if b['version'] == latest_version]
+
+            for i, b in enumerate(latest_binaries, 1):
+                print(f"  {i}. {b['os']} (Version {b['version']})")
+
+            print(f"\nRecommended: Ubuntu-22.04 or Ubuntu-24.04 for most systems")
+
+            try:
+                choice = input(f"Choose [1-{len(latest_binaries)}] (or press Enter for first): ").strip()
+                if choice == "":
+                    idx = 0
+                else:
+                    idx = int(choice) - 1
+                    if idx < 0 or idx >= len(latest_binaries):
+                        raise ValueError()
+                selected = latest_binaries[idx]
+            except (ValueError, EOFError):
+                print("Using first option...")
+                selected = latest_binaries[0]
+        else:
+            # Use first match (latest version)
+            selected = binaries[0]
+
+        print(f"\nSelected: {selected['os']} Version {selected['version']}")
+
+        # Download to temp file
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tgz_path = Path(tmpdir) / "64bit.tgz"
+            self._download_file(selected['url'], tgz_path, "Downloading binary")
+
+            # Extract
+            print("Extracting...")
+            with tarfile.open(tgz_path, 'r:gz') as tar:
+                tar.extractall(tmpdir)
+
+            # Find and install binary
+            extracted_dir = Path(tmpdir) / "64bit"
+            if not extracted_dir.exists():
+                # Sometimes it extracts directly
+                extracted_dir = Path(tmpdir)
+
+            # Look for inla binary
+            inla_binary = None
+            for name in ["inla.mkl.run", "inla.run", "inla"]:
+                candidate = extracted_dir / name
+                if candidate.exists():
+                    inla_binary = candidate
+                    break
+
+            if not inla_binary:
+                raise RuntimeError(f"Could not find INLA binary in extracted files")
+
+            # Install
+            binary_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(inla_binary, binary_path)
+            binary_path.chmod(0o755)
+
+            # Also copy fmesher if present
+            fmesher_src = extracted_dir / "fmesher.run"
+            if fmesher_src.exists():
+                fmesher_dst = binary_path.parent / "fmesher.run"
+                shutil.copy2(fmesher_src, fmesher_dst)
+                fmesher_dst.chmod(0o755)
+                print(f"Installed fmesher to: {fmesher_dst}")
+
+        print(f"Installed INLA binary to: {binary_path}")
+        return binary_path
+
+    def download_mac_binary(
+        self,
+        version: Optional[str] = None,
+        force: bool = False
+    ) -> Path:
+        """Download Mac INLA binary from R package.
+
+        Args:
+            version: Version to download (e.g., "25.04.16"). If None, fetches latest.
+            force: Force re-download
+
+        Returns:
+            Path to installed binary
+        """
+        platform_name = self.detect_platform()
+        if platform_name not in ("mac", "mac.arm64"):
+            raise RuntimeError("This function is for Mac only")
+
+        binary_path = self.get_binary_path(platform_name)
+
+        if not force and self.is_installed(platform_name):
+            print(f"INLA binary already installed at: {binary_path}")
+            return binary_path
+
+        # Select base URL based on architecture
+        if platform_name == "mac.arm64":
+            base_url = self.MAC_ARM64_BASE
+            bin_subdir = "mac.arm64"
+        else:
+            base_url = self.MAC_X86_BASE
+            bin_subdir = "mac/64bit"
+
+        # Find available versions
+        print(f"Fetching available Mac packages...")
+        try:
+            with urllib.request.urlopen(f"{base_url}/", timeout=30) as response:
+                content = response.read().decode('utf-8')
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch Mac packages list: {e}")
+
+        # Parse package names
+        import re
+        packages = re.findall(r'INLA_([0-9.]+)\.tgz', content)
+        packages = sorted(set(packages), reverse=True)
+
+        if not packages:
+            raise RuntimeError("No Mac packages found")
+
+        # Select version
+        if version:
+            if version not in packages:
+                raise RuntimeError(f"Version {version} not found. Available: {packages[:5]}")
+            selected_version = version
+        else:
+            selected_version = packages[0]  # Latest
+
+        pkg_url = f"{base_url}/INLA_{selected_version}.tgz"
+        print(f"Selected: INLA {selected_version}")
+
+        # Download and extract
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tgz_path = Path(tmpdir) / "INLA.tgz"
+            self._download_file(pkg_url, tgz_path, "Downloading Mac package")
+
+            print("Extracting...")
+            with tarfile.open(tgz_path, 'r:gz') as tar:
+                tar.extractall(tmpdir)
+
+            # Find binary in extracted R package
+            extracted = Path(tmpdir) / "INLA" / "bin" / bin_subdir
+
+            inla_binary = None
+            for name in ["inla.run", "inla"]:
+                candidate = extracted / name
+                if candidate.exists():
+                    inla_binary = candidate
+                    break
+
+            if not inla_binary:
+                # Try alternative paths
+                for root, dirs, files in os.walk(Path(tmpdir) / "INLA" / "bin"):
+                    for f in files:
+                        if f in ("inla.run", "inla"):
+                            inla_binary = Path(root) / f
+                            break
+                    if inla_binary:
+                        break
+
+            if not inla_binary:
+                raise RuntimeError("Could not find INLA binary in Mac package")
+
+            # Install
+            binary_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(inla_binary, binary_path)
+            binary_path.chmod(0o755)
+
+            # Also copy fmesher if present
+            fmesher_src = inla_binary.parent / "fmesher.run"
+            if fmesher_src.exists():
+                fmesher_dst = binary_path.parent / "fmesher.run"
+                shutil.copy2(fmesher_src, fmesher_dst)
+                fmesher_dst.chmod(0o755)
+
+        print(f"Installed INLA binary to: {binary_path}")
+        return binary_path
+
+    def download_binary(
+        self,
+        os_name: Optional[str] = None,
+        version: Optional[str] = None,
+        platform_name: Optional[str] = None,
+        force: bool = False,
+        interactive: bool = True
+    ) -> Path:
+        """Download INLA binary for current or specified platform.
+
+        Args:
+            os_name: For Linux, specify OS (e.g., "Ubuntu-22.04")
+            version: Binary version to download
+            platform_name: Platform ("linux", "mac", "mac.arm64"). Auto-detected if None.
+            force: Force re-download
+            interactive: If True, prompt user to choose for Linux
+
+        Returns:
+            Path to installed binary
+        """
+        if platform_name is None:
+            platform_name = self.detect_platform()
+
+        if platform_name == "linux":
+            return self.download_linux_binary(
+                os_name=os_name,
+                version=version,
+                force=force,
+                interactive=interactive
+            )
+        elif platform_name in ("mac", "mac.arm64"):
+            return self.download_mac_binary(version=version, force=force)
+        else:
+            raise ValueError(f"Unknown platform: {platform_name}")
+
+    def list_available_versions(self, platform_name: Optional[str] = None) -> List[str]:
         """List available binary versions for a platform."""
         if platform_name is None:
             platform_name = self.detect_platform()
 
-        if platform_name not in self.BINARY_URLS:
-            return []
-
-        return list(self.BINARY_URLS[platform_name].keys())
+        if platform_name == "linux":
+            binaries = self.list_linux_binaries()
+            versions = sorted(set(b['version'] for b in binaries), reverse=True)
+            return versions[:10]  # Return latest 10
+        else:
+            # For Mac, would need to parse the package listing
+            return ["latest"]
 
     def remove_binary(self, platform_name: Optional[str] = None) -> None:
         """Remove installed binary."""
@@ -202,26 +465,43 @@ class BinaryManager:
 _manager = BinaryManager()
 
 
-def download_binary(version: str = "latest", platform: Optional[str] = None, force: bool = False) -> Path:
+def download_binary(
+    os_name: Optional[str] = None,
+    version: Optional[str] = None,
+    platform: Optional[str] = None,
+    force: bool = False,
+    interactive: bool = True
+) -> Path:
     """Download INLA binary for current or specified platform.
 
+    This works like R-INLA's inla.binary.install() function.
+
     Args:
-        version: Binary version (default: "latest")
-        platform: Platform name (auto-detected if None): "linux", "mac", "mac.arm64"
+        os_name: For Linux, specify OS (e.g., "Ubuntu-22.04", "Ubuntu-24.04")
+        version: Binary version (e.g., "26.01.23")
+        platform: Platform name: "linux", "mac", "mac.arm64" (auto-detected if None)
         force: Force re-download even if exists
+        interactive: If True, show menu to choose Linux OS variant
 
     Returns:
         Path to binary
 
     Example:
         >>> from pyinla import download_binary
-        >>> download_binary()  # Downloads latest for current platform
-        >>> download_binary(version="23.05.30-1", platform="linux")
+        >>> download_binary()  # Interactive selection for current platform
+        >>> download_binary(os_name="Ubuntu-22.04")  # Specific Linux OS
+        >>> download_binary(platform="mac.arm64")  # Mac ARM
     """
-    return _manager.download_binary(version=version, platform_name=platform, force=force)
+    return _manager.download_binary(
+        os_name=os_name,
+        version=version,
+        platform_name=platform,
+        force=force,
+        interactive=interactive
+    )
 
 
-def list_available_binaries(platform: Optional[str] = None) -> list:
+def list_available_binaries(platform: Optional[str] = None) -> List[str]:
     """List available binary versions.
 
     Args:
@@ -238,15 +518,94 @@ def is_binary_installed(platform: Optional[str] = None) -> bool:
     return _manager.is_installed(platform_name=platform)
 
 
-def ensure_binary() -> Path:
+def ensure_binary(os_name: Optional[str] = None) -> Path:
     """Ensure binary is installed, download if missing.
 
     This is called automatically on first use of pyinla.
+
+    Args:
+        os_name: For Linux, specify OS variant (e.g., "Ubuntu-22.04")
 
     Returns:
         Path to binary
     """
     if not _manager.is_installed():
         print("INLA binary not found. Downloading...")
-        return _manager.download_binary()
+        return _manager.download_binary(os_name=os_name, interactive=True)
     return _manager.get_binary_path()
+
+
+def _cli_install():
+    """CLI entry point for installing INLA binary.
+
+    Run after pip install:
+        pyinla-install
+        pyinla-install --os Ubuntu-22.04
+        pyinla-install --force
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Download and install INLA binary for pyINLA",
+        prog="pyinla-install"
+    )
+    parser.add_argument(
+        "--os",
+        help="Linux OS variant (e.g., Ubuntu-22.04, Ubuntu-24.04, Fedora-40)"
+    )
+    parser.add_argument(
+        "--version",
+        help="INLA version (e.g., 26.01.23)"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force re-download even if binary exists"
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List available binaries"
+    )
+
+    args = parser.parse_args()
+
+    if args.list:
+        platform_name = _manager.detect_platform()
+        print(f"Platform: {platform_name}")
+
+        if platform_name == "linux":
+            print("\nFetching available Linux binaries...")
+            binaries = _manager.list_linux_binaries()
+
+            # Group by version
+            versions = {}
+            for b in binaries:
+                if b['version'] not in versions:
+                    versions[b['version']] = []
+                versions[b['version']].append(b['os'])
+
+            print(f"\nFound {len(versions)} versions:")
+            for ver in sorted(versions.keys(), reverse=True)[:5]:
+                print(f"\n  Version {ver}:")
+                for os_name in sorted(versions[ver])[:10]:
+                    print(f"    - {os_name}")
+        else:
+            versions = _manager.list_available_versions()
+            print(f"Available versions: {versions}")
+        return
+
+    try:
+        path = download_binary(
+            os_name=args.os,
+            version=args.version,
+            force=args.force,
+            interactive=True
+        )
+        print(f"\nSuccess! Binary installed at: {path}")
+        print("\nYou can now use pyINLA:")
+        print("  import pyinla")
+        print("  pyinla.activate('YOUR-LICENSE-KEY')")
+    except Exception as e:
+        print(f"\nError: {e}")
+        sys.exit(1)
