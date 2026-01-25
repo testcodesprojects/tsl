@@ -3038,9 +3038,11 @@ def _core(*,
     if not dry_run and inla_arg is None and inla_call is None:
         try:
             inla_call = inla_call_builtin()
-        except FileNotFoundError as e:
+        except (FileNotFoundError, RuntimeError) as e:
             raise PyINLAError(
-                "INLA binary not found. Install R-INLA or set dry_run=True to skip execution."
+                "INLA binary not found and auto-download failed.\n"
+                "Try: pyinla.download_binary(os_name='Ubuntu-22.04')\n"
+                "Or:  pyinla.list_available_os() to see options."
             ) from e
 
     # If caller sets dry_run=True skip executing the INLA binary.
