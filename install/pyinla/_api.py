@@ -2146,6 +2146,54 @@ def _core(*,
     except Exception as _ex:
         raise PyINLAError(f"Failed to expand control.predictor['cross']: {_ex}")
 
+    # Handle link parameter for fitted values (R-INLA: control.predictor$link)
+    # link specifies which link function to use for NA observations when computing fitted values
+    # Values: 0/NA = identity, 1 = likelihood default link (e.g., log for Poisson), etc.
+    file_link_fitted_values = None
+    link_param = pred_spec.get("link")
+    if link_param is not None:
+        # Setting link implies compute=TRUE
+        pred_spec["compute"] = True
+        n_predictor = n
+        m_predictor = m if A is not None else 0
+        total_predictor = n_predictor + m_predictor
+
+        # Convert link to array
+        link_arr = np.atleast_1d(link_param).astype(float)
+
+        # Handle single value (replicate for all observations)
+        if link_arr.size == 1:
+            link_arr = np.repeat(link_arr[0], n_predictor)
+
+        # Validate length
+        if link_arr.size != n_predictor and link_arr.size != total_predictor:
+            raise PyINLAError(
+                f"control.predictor['link'] length ({link_arr.size}) must equal "
+                f"n={n_predictor} or n+m={total_predictor}."
+            )
+
+        # Build (index, link_value - 1) pairs like R-INLA
+        if A is not None:
+            if link_arr.size == m_predictor:
+                # Only m values provided, pad with NA for n
+                tlink = np.column_stack([
+                    np.arange(total_predictor, dtype=np.int64),
+                    np.concatenate([link_arr - 1, np.full(n_predictor, np.nan)])
+                ])
+            else:
+                tlink = np.column_stack([
+                    np.arange(total_predictor, dtype=np.int64),
+                    link_arr - 1
+                ])
+        else:
+            ind_n = np.arange(n_predictor, dtype=np.int64)
+            tlink = np.column_stack([ind_n, link_arr - 1])
+
+        # Write binary file
+        link_file_path = os.path.join(data_dir, "link-fitted-values.dat")
+        write_fmesher_file(tlink, link_file_path)
+        file_link_fitted_values = link_file_path.replace(data_dir_abs, "$inladatadir")
+
     predictor_section(
         file=file_ini,
         n=n,
@@ -2153,7 +2201,7 @@ def _core(*,
         predictor_spec=pred_spec,
         file_offset=offset_path,
         data_dir=data_dir,
-        file_link_fitted_values=None  # optional link mapping file; add if you support it
+        file_link_fitted_values=file_link_fitted_values
     )
 
     # --- Fixed effects => linear sections
