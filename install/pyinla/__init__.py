@@ -2,7 +2,7 @@
 pyinla package entry point.
 """
 
-from ._api import pyinla
+from ._api import pyinla, activate
 from ._api import PyINLAError, PyINLACrashError, PyINLACollectError
 from ._api import PyINLAResult  # retained for backward compatibility
 from .surv import inla_surv
@@ -26,6 +26,7 @@ from .binary_manager import (
 
 __all__ = [
     "pyinla",
+    "activate",
     "inla_surv",
     "PyINLAError",
     "PyINLACrashError",

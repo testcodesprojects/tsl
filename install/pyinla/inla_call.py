@@ -48,7 +48,10 @@ def _resolve_path(*parts: str) -> Optional[str]:
 
 
 def inla_call_builtin() -> str:
-    """Return the built-in path to the inla executable for this OS/arch."""
+    """Return the built-in path to the inla executable for this OS/arch.
+
+    If the binary is not found, automatically downloads it from R-INLA servers.
+    """
     env = os.environ.get("INLA_BIN")
     if env and os.path.exists(env):
         return env
@@ -72,7 +75,11 @@ def inla_call_builtin() -> str:
 
     if path:
         return path
-    raise FileNotFoundError("INLA installation error; inla binary not found for this OS/arch.")
+
+    # Binary not found - auto-download from R-INLA servers
+    from .binary_manager import ensure_binary
+    binary_path = ensure_binary()
+    return str(binary_path)
 
 
 def inla_call_no_remote() -> str:
