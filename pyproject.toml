@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyinla"
-version = "1.0.0"
+version = "0.1.0"
 description = "Python interface for INLA (Integrated Nested Laplace Approximation) with bundled binaries."
 requires-python = ">=3.9"
 authors = [

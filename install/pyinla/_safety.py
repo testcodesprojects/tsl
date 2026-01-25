@@ -604,7 +604,7 @@ def enforce_control_structure(kwargs: Dict[str, Any], families: Tuple[str, ...] 
     if not isinstance(predictor_block, dict):
         raise SafetyError("pyinla safety check: control['predictor'] must be a dict.")
 
-    allowed_predictor = {"compute"}
+    allowed_predictor = {"compute", "link"}
     if "control.link" in predictor_block or "control_link" in predictor_block:
         _validate_control_link(predictor_block.get("control.link") or predictor_block.get("control_link"))
         allowed_predictor.add("control.link")
