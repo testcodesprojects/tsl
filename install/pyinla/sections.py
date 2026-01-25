@@ -197,7 +197,7 @@ def inla_version(which: str="version") -> str:
     if which == "version":
         return "py-inla-sections 0.1.0"
     if which == "date":
-        return _dt.datetime.utcnow().strftime("%Y-%m-%d")
+        return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
     return "unknown"
 
 def inla_enabled_INLAjoint_features() -> bool:
