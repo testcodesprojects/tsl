@@ -21,6 +21,7 @@ from .marginal_utils import (
 from .binary_manager import (
     download_binary,
     list_available_binaries,
+    list_available_os,
     is_binary_installed,
 )
 
@@ -46,5 +47,6 @@ __all__ = [
     # Binary management
     "download_binary",
     "list_available_binaries",
+    "list_available_os",
     "is_binary_installed",
 ]
